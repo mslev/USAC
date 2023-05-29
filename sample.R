@@ -1,168 +1,229 @@
-###############################################################################
-# Start/Import
-###############################################################################
-
-  #Load Libraries
-  library(RSocrata)
-  library(tidyverse)
-  library(plotly)
-  library(reshape2)
-
-  #Bring in data from Socrata API
-  df <- read.socrata("https://opendata.usac.org/resource/tfxa-gt3x.json")
-
-  #Limit data to the state of Massachusetts for recent years  
-  df <- df %>%
-    filter(state == "MA" & support_year >= 2018) %>% 
-    select(sac_name,
-           support_year,
-           support_month,
-           support_month_date_format,
-           technology_type,
-           service_type,
-           submission_type,
-           subscriber_count)
-
-###############################################################################
-# Explore + Clean
-###############################################################################
-  
-#Start out by getting a sense of what the dataset is actually showing
-
-  #Filter out observations that don't add or remove subscribers
-  df_explore <- df %>%
-    filter(!submission_type == "ADJUSTMENT" & !subscriber_count == "0")
-  
-  #Confirm no variation in names for 2018, 2019 and 2020 support years
-    #Add a built-in assumption that there are only 5 providers in the state
-    #Standardize their names
-  if (nrow(table(df_explore$sac_name)) == 5) { 
-    df_explore$sac_name[df_explore$sac_name=="GLOBAL CONNECTION INC OF AMERICA - MA"] <- "StandUp Wireless/Global Connection"
-    df_explore$sac_name[df_explore$sac_name=="GRANBY TEL. & TELE. CO.-MA"] <- "Granby"
-    df_explore$sac_name[df_explore$sac_name=="TRACFONE WIRELESS INC. - MA"] <- "Tracfone/Safelink"
-    df_explore$sac_name[df_explore$sac_name=="VERIZON NEW ENGLAND - MA"] <- "Verizon"
-    df_explore$sac_name[df_explore$sac_name=="VIRGIN MOBILE USA, LP - MA"] <- "Assurance/Virgin/T-Mobile"
-  }
-  
-  #How many updates/corrections have been made for each month-year claim?
-  check_multiple <- as.data.frame(table(df_explore$support_month_date_format, df_explore$sac_name)) %>%
-    select(support_month_date = Var1, company = Var2, frequency = Freq) %>%
-    arrange(desc(frequency))
-  
-  #Claims vs. adjustments
-  table(df_explore$submission_type)
+################################################################################
+# STATUS OF THE LIFELINE PROGRAM IN MASSACHUSETTS: EXPLORATORY DATA ANALYSIS 
+################################################################################
+# Created by:  Marina Levy
+# Last Updated: 5/20/2023 
+#
+# Purpose:
+#   Analyze USAC Lifeline Disbursement data to calculate number of 
+#   Massachusetts subscribers in the program and create graphs to
+#   show subscriber trends
+#
+# Inputs:   Lifeline Disbursement API JSON file
+#
+# Outputs:  total_subscribers.png
+#           subs_by_service_type.png
+#           subs_by_provider.png
+#
+################################################################################
 
 
-  #Let's flatten the df, accounting for corrections over time
-  #Sidenote/to-do: Would it be worth it to keep track of the original numbers 
-    #before corrections? To see if there's a pattern around subscriber counts that
-    #require corrections
-  df_flattened <- df_explore %>%
-    select(-submission_type) %>%
-    group_by(sac_name, 
+library(RSocrata)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(hrbrthemes)
+library(ggtext)
+
+
+# Load data from Socrata data portal 
+df <- read.socrata("https://opendata.usac.org/resource/tfxa-gt3x.json")
+
+# Narrow it down to Massachusetts data, for recent years
+df <- df %>%
+      filter(state == "MA" & support_year >= 2018) %>% 
+      select(sac_name,
              support_year,
              support_month,
              support_month_date_format,
              technology_type,
-             service_type) %>%
-    summarise(subscriber_count = sum(as.numeric(subscriber_count)))
-  
-  #Add rows showing total counts by provider
-  df_withtotals <- spread(df_flattened, service_type, subscriber_count) %>%
-    select(sac_name, support_year, support_month, support_month_date_format, technology_type,
-           broadband = BROADBAND, bundled = BUNDLED, voice = VOICE) %>%
-    mutate(total = sum(broadband, bundled, voice, na.rm=TRUE)) %>%
-    melt(id.vars=c("sac_name",
-                   "support_year",
-                   "support_month",
-                   "support_month_date_format",
-                   "technology_type"))
-  
-  #Isolate just the total counts into their own dataframe
-  just_totals <- df_withtotals %>%
-    filter(as.character(variable) == "total")
-  
-###############################################################################
-# Visualize
-###############################################################################
-  
-  #Tidy up the totals df to prepare for visualization
-  just_totals <- just_totals %>%
-    select(sac_name, support_month_date_format, total = value) %>%
-    spread(key = sac_name, value = total) 
-  
-  just_totals <- just_totals %>%
-    rowwise() %>%
-    mutate(Total = sum(`Assurance/Virgin/T-Mobile`,
-                       `Granby`,
-                       `StandUp Wireless/Global Connection`,
-                       `Tracfone/Safelink`,
-                       `Verizon`, na.rm=TRUE)) %>%
-    melt(id.vars="support_month_date_format")
-  
-  #Graph 1: Overall Totals
-  p1 <- just_totals %>%
-    filter(as.character(variable) == "Total") %>%
-    ggplot(aes(support_month_date_format, value)) +
-    geom_line(aes(color = factor(variable))) +
-    #geom_point() +
-    theme_bw() + 
-    theme(legend.title=element_blank()) +
-    labs(x="Support Month", y = "Subscriptions", title = "Total Subscriptions")
-  p1
-  ggplotly(p1)  #The trend is overwhelmingly pointing to a decrease in subscriptions
-  # But the pandemic in 2020 seems to have led to a small uptick until the last
-  # available month of data
-  
-  #Add table to easily see if last result is lower because data is missing
-  totals_exist <- just_totals %>%
-    filter(!as.character(variable) == "Total") %>%
-    spread(variable, value)
-  
-  totals_exist[is.na(totals_exist)] <- "Missing"  # So there isn't a decline in 
-                                                  #the last month, it's just missing
-  
-  #Graph 2: Totals by Provider
-  p2 <- just_totals %>%
-    filter(!as.character(variable) == "Total") %>%
-    ggplot(aes(support_month_date_format, value)) +
-    geom_line(aes(color = factor(variable))) +
-    #geom_point() +
-    theme_bw() + 
-    theme(legend.title=element_blank()) +
-    labs(x="Support Month", y = "Subscriptions", title = "Total Subscriptions by Provider")
-  p2
-  ggplotly(p2) #Assurance Wireless is fairing the best so far
-  
-  #Totals by technology
-  totals_tech <- df_withtotals %>%
-    filter(as.character(variable) == "broadband" |
-             as.character(variable) == "bundled" |
-             as.character(variable) == "voice") %>%
-    select(support_month_date_format, 
-           variable,
-           value) %>%
-    group_by(support_month_date_format, variable) %>%
-    summarise(Total = sum(value, na.rm=TRUE))
-  
-  p3 <- totals_tech %>%
-    mutate(variable = str_to_title(variable)) %>%
-    ggplot(aes(support_month_date_format, Total)) +
-    geom_line(aes(color = factor(variable))) +
-    theme_bw() + 
-    theme(legend.title=element_blank()) +
-    labs(x="Support Month", y = "Subscriptions", title = "Total Subscriptions by Technology")
-  p3
-  ggplotly(p3)  #Voice-only subscriptions are in decline, but the pandemic response seems to
-                #be leading to an uptick in broadband subscriptions
-  
-  #Subscribers by provider and by technology
-  p4 <- df_withtotals %>%
-    filter(!as.character(variable) == "Total") %>%
-    ggplot(aes(support_month_date_format, value)) +
-    geom_line(aes(color = factor(sac_name), linetype=factor(variable))) +
-    theme_bw() + 
-    theme(legend.title=element_blank())
-  p4
-  ggplotly(p4) #Something strange happened with Tracfone voice subscriptions
-  #from 2019 to 2020 that we should look into in more detail
+             service_type,
+             submission_type,
+             subscriber_count)
+
+################################################################################
+# Clean and flatten the dataset
+################################################################################
+
+# Make subscriber_count be numeric (Socrata imports as character)
+df$subscriber_count <- as.numeric(df$subscriber_count)
+
+
+# There should be 7 approved providers in Massachusetts
+#Add DBAs for each of them, with a quick check to make sure USAC is also
+#displaying 7 providers
+if (length(unique(df$sac_name)) == 7) {
+  df <- df %>%
+      mutate(provider = case_when(
+        startsWith(sac_name, "CITY") ~ 'Westfield',
+        startsWith(sac_name, "GLOBAL") ~ 'StandUp Wireless/Global Connection',
+        startsWith(sac_name, "GRANBY") ~ 'Granby',
+        startsWith(sac_name, "TRACFONE") ~ 'Tracfone/Safelink',
+        startsWith(sac_name, "VERIZON") ~ 'Verizon',
+        startsWith(sac_name, "VIRGIN") ~ 'Assurance/Virgin/T-Mobile',
+        startsWith(sac_name, "TRUCONNECT") ~ 'TruConnect'
+        ))
+}  else {
+    stop("There has been a change in the number of unique companies")
+      }
+
+# Providers will submit a claim for a specific support month stating they had 
+# a certain number of subscribers, but will continue to adjust that amount
+# months after the fact, either repaying disbursed funds or receiving
+# additional funds
+
+# In order to avoid having multiple entries for one single provider-month-service type
+# combination, we flatten all the information a provider submits for a given month,
+# aggregating their counts to reach one subscriber count number in a month, per service type
+
+subscribers <- df %>%
+                #Adjustment rows relate to disbursed funds, not subscribers, so remove them:
+                filter(!submission_type == "ADJUSTMENT") %>% 
+                select(provider, 
+                       support_year,
+                       support_month = support_month_date_format,
+                       technology_type,
+                       service_type,
+                       subscriber_count) %>%
+                group_by(provider,
+                         support_year,
+                         support_month,
+                         technology_type,
+                         service_type) %>%
+                summarize(subscriber_count = sum(subscriber_count), 
+                          .groups = "drop") %>%
+                #Add proper capitalization to tech + service categories
+                mutate_at(vars(technology_type, service_type), str_to_sentence)
+
+################################################################################
+# Identify missing data
+################################################################################
+
+# Providers may choose to wait to file claims for their Lifeline subscribers.
+# While this means they don't receive funding disbursement until the claim
+# is filed, they still have Lifeline subscribers that they serve, so we need
+# to know what the last month of complete data for all providers is if we want 
+# to know how many total subscribers there are in Massachusetts
+
+# Identify where data is missing
+# First, create a data frame of all possible provider-month combinations
+providers <- unique(subscribers$provider)
+support_months <- unique(subscribers$support_month)
+
+all_combos <- expand.grid(provider = providers, support_month = support_months)
+
+# Next, combine all possible combos against existing combinations to highlight
+# missing combinations
+missing_combos <- all_combos %>%
+                left_join(subscribers, by = c("provider", "support_month")) %>%
+                filter(is.na(subscriber_count))
+
+# TruConnect and Westfield are missing for dates prior to their joining the Lifeline
+# program, which makes sense. But Verizon, Tracfone and Assurance are late submitting
+# their claims
+
+# Identify latest month of complete data (where all 7 providers submitted claims)
+latest <- subscribers %>%
+          group_by(support_month) %>%
+          summarize(distinct_providers = n_distinct(provider)) %>%
+          filter(distinct_providers == 7) %>%
+          arrange(desc(support_month)) %>%
+          slice(1) 
+
+latest_month <- latest$support_month[1]
+
+################################################################################
+# Visualize Trends
+################################################################################
+
+# Graph overall totals, excluding the recent months that aren't complete
+
+waiver_end_date <-  as.POSIXct("2021-05-01") # Date that Lifeline non-usage pandemic waiver expired 
+
+p1 <- subscribers %>%
+          # Aggregate all subscriber counts to the support_month level
+          filter(support_month <= latest_month) %>% # Keep data up to most recent complete month
+          group_by(support_month) %>%
+          summarise(subscribers = sum(subscriber_count)) %>%
+          # Plot
+          ggplot(aes(x=support_month, y=subscribers)) +
+          geom_line(linewidth = 1) +
+          xlab("Support Month") +
+          scale_y_comma(limits=c(0,200000)) +
+          scale_x_datetime(date_labels = "%Y-%m") +
+          geom_vline(xintercept = waiver_end_date, linetype="dashed",
+                     color = "red", alpha = 0.4, size=1) +
+          annotate("text", x = (waiver_end_date + 50), y = 43000, 
+                   label = "End of Non-Usage Waiver \n", angle=90) +
+          labs(x="Support Month", y="Total Subscribers",
+               title="Total Lifeline Subscribers in Massachusetts",
+               caption="From the USAC Open Data Portal (Lifeline Disbursements)") +
+       guides(x = guide_axis(angle = 45)) +
+          theme_ipsum_rc()
+p1
+
+ggsave("total_subscribers.png", plot = p1)
+
+# Graph state totals by service type (broadband, voice, bundled)
+
+p2 <-  subscribers %>%
+          # Aggregate subscriber counts by support_month and service type
+          select(support_month, service_type, subscriber_count) %>%
+          filter(support_month <= latest_month) %>% 
+          group_by(support_month, service_type) %>%
+          summarise(subscribers = sum(subscriber_count)) %>%
+          # Plot
+          ggplot(aes(x=support_month , y=subscribers, color = service_type)) +
+          geom_line(linewidth = 1) +
+          scale_y_comma(limits = c(0, 125000)) +
+          scale_x_datetime(date_labels = "%Y-%m") +
+          guides(x = guide_axis(angle = 45)) +
+          geom_vline(xintercept = waiver_end_date, linetype = "dashed", 
+                     color = "red", alpha = 0.4, size = 1) +
+          annotate("text", x = (waiver_end_date + 50), y = 85000, 
+                   label = "End of Non-Usage Waiver \n", angle = -90) +
+          labs(x="Support Month", y="Total Subscribers",
+               title="Lifeline Subscribers in Massachusetts. 
+               <br><span style = 'color:#1736ff;'>Broadband</span>, 
+               <span style = 'color:#45e0ff;'>Voice</span>, 
+               and <span style = 'color:#cc00ff;'>Bundled</span> subscribers <br>by month",
+               caption="From the USAC Open Data Portal (Lifeline Disbursements)") +
+          theme_ipsum_rc() +
+          theme(panel.grid.major.x = element_blank(),
+                plot.title = element_markdown(),
+                legend.position = "none") +
+          scale_color_manual(values = c("#1736ff", "#cc00ff", "#45e0ff")) 
+
+p2
+
+ggsave("subs_by_service_type.png", plot = p2)
+
+# Graph state totals by provider
+
+p3 <- subscribers %>%
+        # Aggregate subscriber counts by support_month and provider
+        select(support_month, provider, subscriber_count) %>%
+        group_by(support_month, provider) %>%
+        summarise(subscribers = sum(subscriber_count)) %>%
+        # Plot
+        ggplot(aes(x=support_month , y=subscribers, color = provider)) +
+        geom_line(size = 1) +
+        scale_y_comma(limits = c(0, 125000)) +
+        scale_x_datetime(date_labels = "%Y-%m") +
+        guides(x = guide_axis(angle = 45)) +
+        geom_vline(xintercept = waiver_end_date, linetype = "dashed", 
+                   color = "red", alpha = 0.4, size = 1) +
+        annotate("text", x = (waiver_end_date + 50), y = 85000, 
+                 label = "End of Non-Usage Waiver \n", angle = -90) +
+        labs(x="Support Month", y="Total Subscribers",
+             title="Lifeline Subscribers in Massachusetts by Provider",
+             caption="From the USAC Open Data Portal (Lifeline Disbursements)",
+             col = "Provider: ") +
+        theme_ipsum_rc() 
+
+p3 <- p3+ theme(legend.position="bottom") 
+
+p3
+
+ggsave("subs_by_provider.png", plot = p3, width = 8)
